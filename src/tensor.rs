@@ -2,11 +2,11 @@ use std::{cell::RefCell, fmt::{Display, Formatter}, ops::{Add, Div, Mul, Neg, Su
 
 use cudarc::{driver::{CudaDevice, CudaSlice, DeviceRepr, DriverError, LaunchAsync, LaunchConfig, ValidAsZeroBits}, nvrtc::compile_ptx};
 
-use crate::{autograd::{add::AddBackward, div::DivBackward, mm::MMBackward, mul::MulBackward, neg::NegBackward, sub::SubBackward, sum::SumBackward, transpose::TransposeBackward, AutogradOps}, cuda_kernel::{ARITHMETIC_SRC, UTILS_SRC}};
+use crate::{autograd::{add::AddBackward, div::DivBackward, mm::MMBackward, mul::MulBackward, neg::NegBackward, relu::ReluBackward, sub::SubBackward, sum::SumBackward, transpose::TransposeBackward, AutogradOps}, cuda_kernel::{ACTIVATION_SRC, ARITHMETIC_SRC, COMPARISON_SRC, UTILS_SRC}};
 
-pub trait TensorElement: Copy + Clone + Display + DeviceRepr + ValidAsZeroBits + Into<f32> + Into<f64> + From<f32> + Neg<Output = Self> + Add<Output = Self> + Sub<Output = Self> + Mul<Output = Self> + Div<Output = Self> {}
+pub trait TensorElement: Copy + Clone + PartialOrd + Display + DeviceRepr + ValidAsZeroBits + Into<f32> + Into<f64> + From<f32> + Neg<Output = Self> + Add<Output = Self> + Sub<Output = Self> + Mul<Output = Self> + Div<Output = Self> {}
 
-impl<T> TensorElement for T where T: Copy + Clone + Display + DeviceRepr + ValidAsZeroBits + Into<f32> + Into<f64> + From<f32> + Neg<Output = Self> + Add<Output = Self> + Sub<Output = Self> + Mul<Output = Self> + Div<Output = Self> {}
+impl<T> TensorElement for T where T: Copy + Clone + PartialOrd + Display + DeviceRepr + ValidAsZeroBits + Into<f32> + Into<f64> + From<f32> + Neg<Output = Self> + Add<Output = Self> + Sub<Output = Self> + Mul<Output = Self> + Div<Output = Self> {}
 
 #[derive(Debug, Clone)]
 enum Device<T: TensorElement> {
@@ -72,6 +72,12 @@ impl<T: TensorElement> Tensor<T> {
 
         let ptx = compile_ptx(UTILS_SRC).expect("Failed to compile PTX");
         device.load_ptx(ptx, "util", &["get_flat_item"]).expect("Failed to load PTX");
+
+        let ptx = compile_ptx(ACTIVATION_SRC).expect("Failed to compile PTX");
+        device.load_ptx(ptx, "activation", &["relu"]).expect("Failed to load PTX");
+
+        let ptx = compile_ptx(COMPARISON_SRC).expect("Failed to compile PTX");
+        device.load_ptx(ptx, "comparison", &["gt"]).expect("Failed to load PTX");
     }
     
     fn new_cpu_data(data: &[T], shape: &[usize], requires_grad: bool) -> TensorData<T> {
@@ -160,6 +166,15 @@ impl<T: TensorElement> Tensor<T> {
         let data = vec![T::from(0.0f32); shape.iter().product()];
         Self::new(&data, shape, requires_grad)
     }
+
+    pub fn zeros_like(&self) -> Self {
+        let self_data = self.data.borrow();
+        let mut result = Self::zeros(&self_data.shape, self_data.requires_grad);
+        if let Device::GPU(_, device) = &self_data.device {
+            result.to_gpu().unwrap();
+        }
+        result
+    }
     
     pub fn ones(shape: &[usize], requires_grad: bool) -> Self {
         let data = vec![T::from(1.0f32); shape.iter().product()];
@@ -168,7 +183,11 @@ impl<T: TensorElement> Tensor<T> {
 
     pub fn ones_like(&self) -> Self {
         let self_data = self.data.borrow();
-        Self::ones(&self_data.shape, self_data.requires_grad)
+        let mut result = Self::ones(&self_data.shape, self_data.requires_grad);
+        if let Device::GPU(_, device) = &self_data.device {
+            result.to_gpu().unwrap();
+        }
+        result
     }
 
     pub fn grad(&self) -> Option<Self> {
@@ -925,6 +944,93 @@ impl<T: TensorElement> Tensor<T> {
     fn gpu_mm(&self, data: &CudaSlice<T>, other: &CudaSlice<T>, device: &Arc<CudaDevice>) -> Self {
         unimplemented!()
     }
+
+    pub fn gt(&self, other: &Self) -> Self {
+        let self_data = self.data.borrow();
+        let other_data = other.data.borrow();
+
+        assert_eq!(self_data.shape, other_data.shape, "Cannot compare tensors with different shapes");
+
+        match (&self_data.device, &other_data.device) {
+            (Device::CPU(data), Device::CPU(other_data)) => self.cpu_gt(data, &other_data),
+            (Device::GPU(data, device), Device::GPU(other_data, other_device)) => self.gpu_gt(data, other_data, device),
+            _ => panic!("Cannot compare CPU tensor with GPU tensor or vice versa. Move tensors to the same device first."),
+        }
+    }
+
+    fn cpu_gt(&self, data: &Vec<T>, other: &Vec<T>) -> Self {
+
+        let self_data = self.data.borrow();
+
+        let data = data.iter().zip(other.iter()).map(|(a, b)| if *a > *b { T::from(1.0f32) } else { T::from(0.0f32) }).collect::<Vec<T>>();
+        Self::new(&data, &self_data.shape, false)
+    }
+
+    fn gpu_gt(&self, data: &CudaSlice<T>, other: &CudaSlice<T>, device: &Arc<CudaDevice>) -> Self {
+
+        let self_data = self.data.borrow();
+
+        let mut result = device.alloc_zeros(self_data.size).unwrap();
+
+        let cfg = LaunchConfig::for_num_elems(self_data.size as u32);
+
+        let func = device.get_func("comparison", "gt").unwrap();
+
+        unsafe {
+            func.launch(cfg, (data, other, &mut result, self_data.size)).unwrap();
+        }
+
+        Self {
+            data: Rc::new(RefCell::new(Self::new_gpu_data(result, device, &self_data.shape, false)))
+        }
+    }
+    
+    pub fn relu(&self) -> Self {
+        let self_data = self.data.borrow();
+
+        let result = match &self_data.device {
+            Device::CPU(data) => self.cpu_relu(data),
+            Device::GPU(data, device) => self.gpu_relu(data, device),
+        };
+
+        let result_ref = result.data.clone();
+        let mut result_data = result_ref.borrow_mut();
+
+        result_data.requires_grad = self_data.requires_grad;
+
+        if result_data.requires_grad {
+            result_data.grad_fn = Some(Rc::new(AutogradOps::ReluBackward(ReluBackward::new([self.data.clone()]))));
+        }
+
+        result
+    }
+
+    fn cpu_relu(&self, data: &Vec<T>) -> Self {
+
+        let self_data = self.data.borrow();
+
+        let data = data.iter().map(|a| if *a > T::from(0.0) { *a } else { T::from(0.0) } ).collect::<Vec<T>>();
+        Self::new(&data, &self_data.shape, false)
+    }
+
+    fn gpu_relu(&self, data: &CudaSlice<T>, device: &Arc<CudaDevice>) -> Self {
+
+        let self_data = self.data.borrow();
+
+        let mut result = device.alloc_zeros(self_data.size).unwrap();
+
+        let cfg = LaunchConfig::for_num_elems(self_data.size as u32);
+
+        let func = device.get_func("activation", "relu").unwrap();
+
+        unsafe {
+            func.launch(cfg, (data, &mut result, self_data.size)).unwrap();
+        }
+
+        Self {
+            data: Rc::new(RefCell::new(Self::new_gpu_data(result, device, &self_data.shape, self_data.requires_grad)))
+        }
+    }
 }
 
 pub trait FromRcRefCell<T> {
@@ -1458,5 +1564,32 @@ mod test {
         assert_eq!(a.grad().unwrap().get_data(), &[6.0, 6.0, 4.0, 4.0]);
         assert_eq!(b.grad().unwrap().get_shape(), &[2, 2]);
         assert_eq!(b.grad().unwrap().get_data(), &[3.0, 7.0, 3.0, 7.0]);
+    }
+
+    #[test]
+    fn test_relu() {
+
+        let a = Tensor::<f32>::new(&[-1.0, 2.0, -3.0, 4.0], &[2, 2], true);
+        let b = a.relu();
+        b.backward(None);
+
+        assert_eq!(b.get_data(), &[0.0, 2.0, 0.0, 4.0]);
+        assert_eq!(b.get_shape(), &[2, 2]);
+        assert_eq!(a.grad().unwrap().get_shape(), &[2, 2]);
+        assert_eq!(a.grad().unwrap().get_data(), &[0.0, 1.0, 0.0, 1.0]);
+    }
+
+    #[test]
+    fn test_gpu_relu() {
+
+        let mut a = Tensor::<f32>::new(&[-1.0, 2.0, -3.0, 4.0], &[2, 2], true);
+        a.to_gpu().unwrap();
+        let b = a.relu();
+        b.backward(None);
+
+        assert_eq!(b.get_data(), &[0.0, 2.0, 0.0, 4.0]);
+        assert_eq!(b.get_shape(), &[2, 2]);
+        assert_eq!(a.grad().unwrap().get_shape(), &[2, 2]);
+        assert_eq!(a.grad().unwrap().get_data(), &[0.0, 1.0, 0.0, 1.0]);
     }
 }

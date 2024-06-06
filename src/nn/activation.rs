@@ -8,6 +8,6 @@ pub struct ReLU;
 
 impl Activation for ReLU {
     fn forward(&self, x: &Parameter) -> Parameter {
-        Parameter::new(&[2, 2])
+        x.relu().into()
     }
 }

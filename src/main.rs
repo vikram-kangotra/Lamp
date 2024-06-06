@@ -13,13 +13,10 @@ fn main() {
 
     let criterion = MSELoss::new();
 
-    let a: Parameter = Tensor::<f32>::new(&[1., 2., 3., 3., 4., 1., 3., 4.], &[2, 2, 2], true).into();
-    let b: Parameter = Tensor::<f32>::new(&[1., 2., 4., 5., 2., 1., 1., 2.], &[2, 2, 2], true).into();
+    let a: Parameter = Tensor::<f32>::new(&[1., 2., 3., 4.], &[2, 2], true).into();
+    let b: Parameter = Tensor::<f32>::new(&[1., 2., 3., 4.], &[2, 2], true).into();
 
-    let a: Parameter = a.transpose().into();
-    let b: Parameter = b.transpose().into();
+    let c = a.mm(&b);
 
-    let loss = criterion.forward(&a, &b);
-
-    println!("{}", a);
+    println!("{}", c);
 }

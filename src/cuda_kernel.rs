@@ -99,3 +99,21 @@ extern "C" __global__ void get_flat_item(const float *data, float *result, int o
     }
 }
 "#;
+
+pub const ACTIVATION_SRC: &str = r#"
+extern "C" __global__ void relu(const float *a, float *c, int n) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n) {
+        c[i] = fmaxf(0, a[i]);
+    }
+}
+"#;
+
+pub const COMPARISON_SRC: &str = r#"
+extern "C" __global__ void gt(const float *a, const float *b, float *c, int n) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n) {
+        c[i] = a[i] > b[i];
+    }
+}
+"#;
