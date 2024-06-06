@@ -82,6 +82,14 @@ extern "C" __global__ void sum(float *a, float *c, int size) {
         c[blockIdx.x] = sdata[0];
     }
 }
+
+extern "C" __global__ void transpose(const float *a, float *c, int m, int n) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    int j = blockIdx.y * blockDim.y + threadIdx.y;
+    if (i < m && j < n) {
+        c[j * m + i] = a[i * n + j];
+    }
+}
 "#;
 
 pub const UTILS_SRC: &str = r#"
