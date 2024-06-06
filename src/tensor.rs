@@ -2,7 +2,7 @@ use std::{cell::RefCell, fmt::{Display, Formatter}, ops::{Add, Div, Mul, Neg, Su
 
 use cudarc::{driver::{CudaDevice, CudaSlice, DeviceRepr, DriverError, LaunchAsync, LaunchConfig, ValidAsZeroBits}, nvrtc::compile_ptx};
 
-use crate::{autograd::{add::AddBackward, div::DivBackward, mul::MulBackward, neg::NegBackward, sub::SubBackward, sum::SumBackward, AutogradOps}, cuda_kernel::{ARITHMETIC_SRC, UTILS_SRC}};
+use crate::{autograd::{add::AddBackward, div::DivBackward, mul::MulBackward, neg::NegBackward, sub::SubBackward, sum::SumBackward, transpose::TransposeBackward, AutogradOps}, cuda_kernel::{ARITHMETIC_SRC, UTILS_SRC}};
 
 pub trait TensorElement: Copy + Clone + Display + DeviceRepr + ValidAsZeroBits + Into<f32> + Into<f64> + From<f32> + Neg<Output = Self> + Add<Output = Self> + Sub<Output = Self> + Mul<Output = Self> + Div<Output = Self> {}
 
@@ -227,6 +227,23 @@ impl<T: TensorElement> Tensor<T> {
             Device::CPU(data) => data[offset].clone(),
             Device::GPU(data, device) => self.gpu_get_flat_item(data, device, offset),
         }
+    }
+
+    pub fn get_item(&self, indices: &[usize]) -> T {
+
+        let self_data = self.data.borrow();
+
+        let offset = self.compute_offset(indices);
+        self.get_flat_item(offset)
+    }
+
+    fn compute_offset(&self, indices: &[usize]) -> usize {
+
+        let self_data = self.data.borrow();
+
+        assert_eq!(indices.len(), self_data.shape.len(), "Number of indices must match number of dimensions");
+
+        indices.iter().zip(self_data.strides.iter()).fold(0, |acc, (index, stride)| acc + index * stride)
     }
 
     pub fn gpu_get_flat_item(&self, data: &CudaSlice<T>, device: &Arc<CudaDevice>, offset: usize) -> T {
@@ -775,6 +792,64 @@ impl<T: TensorElement> Tensor<T> {
             data: Rc::new(RefCell::new(Self::new_gpu_data(result, device, &[1], self_data.requires_grad)))
         }
     }
+
+    pub fn transpose(&self) -> Self {
+        let self_data = self.data.borrow();
+
+        let result = match &self_data.device {
+            Device::CPU(data) => self.cpu_transpose(data),
+            Device::GPU(data, device) => self.gpu_transpose(data, device),
+        };
+
+        let result_ref = result.data.clone();
+        let mut result_data = result_ref.borrow_mut();
+
+        result_data.requires_grad = self_data.requires_grad;
+
+        if result_data.requires_grad {
+            result_data.grad_fn = Some(Rc::new(AutogradOps::TransposeBackward(TransposeBackward::new([self.data.clone()]))));
+        }
+
+        result
+    }
+
+    fn cpu_transpose(&self, data: &Vec<T>) -> Self {
+
+        let self_data = self.data.borrow();
+
+        let mut result = vec![T::from(0.0f32); self_data.size];
+
+        match self_data.shape.len() {
+            1 => result.copy_from_slice(data),
+            2 => Self::cpu_transpose_2d(data, &mut result, self_data.shape[0], self_data.shape[1]),
+            3 => Self::cpu_transpose_3d(data, &mut result, self_data.shape[0], self_data.shape[1], self_data.shape[2]),
+            _ => panic!("Transpose is not implemented for tensors with more than 3 dimensions"),
+        }
+
+        Self::new(&result, &self_data.shape.iter().rev().cloned().collect::<Vec<usize>>(), false)
+    }
+
+    fn cpu_transpose_2d(data: &Vec<T>, result: &mut Vec<T>, rows: usize, cols: usize) {
+        for i in 0..rows {
+            for j in 0..cols {
+                result[j * rows + i] = data[i * cols + j];
+            }
+        }
+    }
+
+    fn cpu_transpose_3d(data: &Vec<T>, result: &mut Vec<T>, dim1: usize, dim2: usize, dim3: usize) {
+        for i in 0..dim1 {
+            for j in 0..dim2 {
+                for k in 0..dim3 {
+                    result[k * dim1 * dim2 + j * dim1 + i] = data[i * dim2 * dim3 + j * dim3 + k];
+                }
+            }
+        }
+    }
+
+    fn gpu_transpose(&self, data: &CudaSlice<T>, device: &Arc<CudaDevice>) -> Self {
+        unimplemented!()
+    }
 }
 
 pub trait FromRcRefCell<T> {
@@ -1253,5 +1328,24 @@ mod test {
         assert_eq!(b.get_shape(), &[1]);
         assert_eq!(a.grad().unwrap().get_shape(), &[2, 2]);
         assert_eq!(a.grad().unwrap().get_data(), &[1.0, 1.0, 1.0, 1.0]);
+    }
+
+    #[test]
+    fn test_transpose() {
+
+        let a = Tensor::<f32>::new(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0], &[2, 3], true);
+        let b = a.transpose();
+        b.backward(None);
+
+        assert_eq!(b.get_shape(), &[3, 2]);
+
+        for i in 0..3 {
+            for j in 0..2 {
+                assert_eq!(b.get_item(&[i, j]), a.get_item(&[j, i]));
+            }
+        }
+
+        assert_eq!(a.grad().unwrap().get_shape(), &[2, 3]);
+        assert_eq!(a.grad().unwrap().get_data(), &[1.0, 1.0, 1.0, 1.0, 1.0, 1.0]);
     }
 }
