@@ -5,6 +5,8 @@ use lamp::tensor::Tensor;
 
 use serde::{Serialize, Deserialize};
 
+use plotters::prelude::*;
+
 #[derive(Serialize, Deserialize)]
 struct Model {
     fc1: Linear,
@@ -44,18 +46,78 @@ impl ModuleParams for Model {
     }
 }
 
-fn main() {
+fn loss_plot(loss: Vec<f32>) {
+    let root = BitMapBackend::new("loss.png", (800, 600)).into_drawing_area();
+    root.fill(&WHITE).unwrap();
 
-    let epochs = 100;
+    let mut chart = ChartBuilder::on(&root)
+        .caption("Loss", ("sans-serif", 30))
+        .margin(10)
+        .x_label_area_size(30)
+        .y_label_area_size(30)
+        .build_cartesian_2d(0..100, 0.0f32..1.0).unwrap();
+
+    chart.configure_mesh().draw().unwrap();
+
+    chart.draw_series(LineSeries::new(
+        loss.iter().enumerate().map(|(i, y)| (i as i32, *y)),
+        &RED,
+    )).unwrap();
+
+    root.present().unwrap();
+}
+
+fn color_map(model: &Model) {
+    let root = BitMapBackend::new("color_map.png", (800, 600)).into_drawing_area();
+    root.fill(&WHITE).unwrap();
+
+    let mut chart = ChartBuilder::on(&root)
+        .caption("Color Map", ("sans-serif", 30))
+        .margin(10)
+        .x_label_area_size(30)
+        .y_label_area_size(30)
+        .build_cartesian_2d(0.0f32..1.0, 0.0f32..1.0).unwrap();
+
+    chart.configure_mesh().draw().unwrap();
+
+    for x in 0..200 {
+        for y in 0..200 {
+            let x = x as f32 / 200.0;
+            let y = y as f32 / 200.0;
+
+            let input = Tensor::<f32>::new(&[x, y], &[2, 1], false).into();
+            let output = model.forward(&input);
+
+            let color = if output.get_flat_item(0) > 0.5 { GREEN } else { BLUE };
+
+            chart.draw_series(PointSeries::of_element(
+                vec![(x, y)],
+                5,
+                &color,
+                &|c, s, st| {
+                    return EmptyElement::at(c)    // We want to use the provided coordinates
+                        + Circle::new((0, 0), s, st.filled()); // And a circle that is 2 pixels in diameter
+                },
+            )).unwrap();
+        }
+    }
+
+    root.present().unwrap();
+}
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+
+    let epochs = 1000;
 
     let model = Model::new(2, 1);
     let criterion = MSELoss::new();
     let mut optim = SGD::new(model.parameters(), 0.5, 0.0);
 
     let input = [[0.0, 0.0], [0.0, 1.0], [1.0, 0.0], [1.0, 1.0]];
-    let target = input.iter().map(|[a, b]| (*a as u32 ^ *b as u32) as f32).collect::<Vec<f32>>();
+    let target = [0.0, 1.0, 1.0, 0.0];
 
     let mut loss = Parameter::new(&[1, 1]);
+    let mut loss_series = Vec::new();
 
     for epoch in 0..epochs {
         for (x, target) in input.iter().zip(target.iter()) {
@@ -68,16 +130,21 @@ fn main() {
             optim.zero_grad();
             loss.backward(None);
             optim.step();
+
         }
 
+        loss_series.push(loss.get_flat_item(0));
         println!("Epoch: {}/{epochs}, Loss: {}", epoch + 1, loss);
     }
 
     println!("Final loss: {}", loss.get_flat_item(0));
 
-    model.save_model("examples/model").unwrap();
+    loss_plot(loss_series);
+    color_map(&model);
 
-    let model = Model::load_model("examples/model").unwrap();
+    model.save_model("model").unwrap();
+
+    let model = Model::load_model("model").unwrap();
 
     let x = Tensor::<f32>::new(&[0.0, 0.0], &[2, 1], false).into();
     let y = model.forward(&x);
@@ -95,4 +162,5 @@ fn main() {
     let y = model.forward(&x);
     println!("1 XOR 1 = {}", if y.get_flat_item(0) > 0.5 { 1 } else { 0 });
 
+    Ok(())
 }
