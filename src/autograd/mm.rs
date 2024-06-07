@@ -28,8 +28,8 @@ impl<T: TensorElement> AutogradFunction<T> for MMBackward<T> {
         let x = &self.inputs[0];
         let y = &self.inputs[1];
 
-        let x_grad = y.transpose().mm(&grad);
-        let y_grad = grad.mm(&x.transpose());
+        let x_grad = grad.mm(&y.transpose());
+        let y_grad = x.transpose().mm(&grad);
 
         vec![x_grad, y_grad]
     }

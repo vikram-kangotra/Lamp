@@ -7,8 +7,14 @@ pub mod sum;
 pub mod transpose;
 pub mod mm;
 pub mod relu;
+pub mod sigmoid;
 
-use crate::autograd::{neg::NegBackward, add::AddBackward, sub::SubBackward, mul::MulBackward, div::DivBackward, sum::SumBackward, transpose::TransposeBackward, mm::MMBackward, relu::ReluBackward};
+use crate::autograd::{
+    neg::NegBackward, add::AddBackward, sub::SubBackward,
+    mul::MulBackward, div::DivBackward, sum::SumBackward, 
+    transpose::TransposeBackward, mm::MMBackward, 
+    relu::ReluBackward, sigmoid::SigmoidBackward
+};
 
 use crate::tensor::{Tensor, TensorElement};
 
@@ -42,7 +48,12 @@ macro_rules! autograd_ops {
     };
 }
 
-autograd_ops!(NegBackward, AddBackward, SubBackward, MulBackward, DivBackward, SumBackward, TransposeBackward, MMBackward, ReluBackward);
+autograd_ops!(
+    NegBackward, AddBackward, SubBackward, 
+    MulBackward, DivBackward, SumBackward, 
+    TransposeBackward, MMBackward, 
+    ReluBackward, SigmoidBackward
+);
 
 trait AutogradFunction<T: TensorElement> {
     fn inputs(&self) -> &[Tensor<T>];

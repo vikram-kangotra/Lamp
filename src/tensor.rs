@@ -1,12 +1,14 @@
-use std::{cell::RefCell, fmt::{Display, Formatter}, ops::{Add, Div, Mul, Neg, Sub}, rc::Rc, sync::Arc};
+use std::{cell::RefCell, fmt::{Display, Formatter}, ops::{Add, AddAssign, Div, Mul, Neg, Sub}, rc::Rc, sync::Arc};
 
 use cudarc::{driver::{CudaDevice, CudaSlice, DeviceRepr, DriverError, LaunchAsync, LaunchConfig, ValidAsZeroBits}, nvrtc::compile_ptx};
 
-use crate::{autograd::{add::AddBackward, div::DivBackward, mm::MMBackward, mul::MulBackward, neg::NegBackward, relu::ReluBackward, sub::SubBackward, sum::SumBackward, transpose::TransposeBackward, AutogradOps}, cuda_kernel::{ACTIVATION_SRC, ARITHMETIC_SRC, COMPARISON_SRC, UTILS_SRC}};
+use crate::{autograd::{add::AddBackward, div::DivBackward, mm::MMBackward, mul::MulBackward, neg::NegBackward, relu::ReluBackward, sigmoid::SigmoidBackward, sub::SubBackward, sum::SumBackward, transpose::TransposeBackward, AutogradOps}, cuda_kernel::{ACTIVATION_SRC, ARITHMETIC_SRC, COMPARISON_SRC, UTILS_SRC}};
 
-pub trait TensorElement: Copy + Clone + PartialOrd + Display + DeviceRepr + ValidAsZeroBits + Into<f32> + Into<f64> + From<f32> + Neg<Output = Self> + Add<Output = Self> + Sub<Output = Self> + Mul<Output = Self> + Div<Output = Self> {}
+use num::Float;
 
-impl<T> TensorElement for T where T: Copy + Clone + PartialOrd + Display + DeviceRepr + ValidAsZeroBits + Into<f32> + Into<f64> + From<f32> + Neg<Output = Self> + Add<Output = Self> + Sub<Output = Self> + Mul<Output = Self> + Div<Output = Self> {}
+pub trait TensorElement: Copy + Clone + PartialOrd + Display + DeviceRepr + ValidAsZeroBits + Neg<Output = Self> + Add<Output = Self> + Sub<Output = Self> + Mul<Output = Self> + Div<Output = Self> + Float {}
+
+impl<T> TensorElement for T where T: Copy + Clone + PartialOrd + Display + DeviceRepr + ValidAsZeroBits + Neg<Output = Self> + Add<Output = Self> + Sub<Output = Self> + Mul<Output = Self> + Div<Output = Self> + Float {}
 
 #[derive(Debug, Clone)]
 enum Device<T: TensorElement> {
@@ -68,13 +70,13 @@ impl<T: TensorElement> Tensor<T> {
 
     fn initialize_device(device: &Arc<CudaDevice>) {
         let ptx = compile_ptx(ARITHMETIC_SRC).expect("Failed to compile PTX");
-        device.load_ptx(ptx, "arithmetic", &["neg", "add", "add_scalar", "sub", "sub_scalar", "mul", "mul_scalar", "div", "div_scalar", "sum", "transpose"]).expect("Failed to load PTX");
+        device.load_ptx(ptx, "arithmetic", &["neg", "add", "add_scalar", "sub", "sub_scalar", "mul", "mul_scalar", "div", "div_scalar", "sum", "transpose", "mm"]).expect("Failed to load PTX");
 
         let ptx = compile_ptx(UTILS_SRC).expect("Failed to compile PTX");
         device.load_ptx(ptx, "util", &["get_flat_item"]).expect("Failed to load PTX");
 
         let ptx = compile_ptx(ACTIVATION_SRC).expect("Failed to compile PTX");
-        device.load_ptx(ptx, "activation", &["relu"]).expect("Failed to load PTX");
+        device.load_ptx(ptx, "activation", &["relu", "sigmoid"]).expect("Failed to load PTX");
 
         let ptx = compile_ptx(COMPARISON_SRC).expect("Failed to compile PTX");
         device.load_ptx(ptx, "comparison", &["gt"]).expect("Failed to load PTX");
@@ -163,7 +165,8 @@ impl<T: TensorElement> Tensor<T> {
     }
 
     pub fn zeros(shape: &[usize], requires_grad: bool) -> Self {
-        let data = vec![T::from(0.0f32); shape.iter().product()];
+        let zero = T::from(0.0f32).unwrap();
+        let data = vec![zero; shape.iter().product()];
         Self::new(&data, shape, requires_grad)
     }
 
@@ -177,7 +180,8 @@ impl<T: TensorElement> Tensor<T> {
     }
     
     pub fn ones(shape: &[usize], requires_grad: bool) -> Self {
-        let data = vec![T::from(1.0f32); shape.iter().product()];
+        let one = T::from(1.0f32).unwrap();
+        let data = vec![one; shape.iter().product()];
         Self::new(&data, shape, requires_grad)
     }
 
@@ -194,6 +198,15 @@ impl<T: TensorElement> Tensor<T> {
         self.data.borrow().grad.clone()
     }
 
+    pub fn zero_grad(&mut self) {
+        self.data.borrow_mut().grad = None;
+    }
+
+    pub fn detach(&self) {
+        self.data.borrow_mut().grad = None;
+        self.data.borrow_mut().grad_fn = None;
+    }
+
     pub fn backward(&self, gradient: Option<Self>) {
 
         let mut self_data = self.data.borrow_mut();
@@ -205,7 +218,7 @@ impl<T: TensorElement> Tensor<T> {
         let gradient = match gradient {
             Some(grad) => grad,
             None => {
-                let data = vec![T::from(1.0f32); self_data.size];
+                let data = vec![T::from(1.0f32).unwrap(); self_data.size];
                 let mut grad = Self::new(&data, &self_data.shape, false);
                 if let Device::GPU(_, device) = &self_data.device {
                     grad.to_gpu().unwrap();
@@ -787,7 +800,7 @@ impl<T: TensorElement> Tensor<T> {
 
         let self_data = self.data.borrow();
 
-        let sum = data.iter().fold(T::from(0.0f32), |acc, x| acc + *x);
+        let sum = data.iter().fold(T::from(0.0f32).unwrap(), |acc, x| acc + *x);
         let data = vec![sum; 1];
         Self::new(&data, &[1], false)
     }
@@ -836,7 +849,7 @@ impl<T: TensorElement> Tensor<T> {
 
         let self_data = self.data.borrow();
 
-        let mut result = vec![T::from(0.0f32); self_data.size];
+        let mut result = vec![T::from(0.0f32).unwrap(); self_data.size];
 
         match self_data.shape.len() {
             1 => result.copy_from_slice(data),
@@ -902,7 +915,7 @@ impl<T: TensorElement> Tensor<T> {
 
         let result = match (&self_data.device, &other_data.device) {
             (Device::CPU(data), Device::CPU(other_data)) => self.cpu_mm(data, &other_data),
-            (Device::GPU(data, device), Device::GPU(other_data, other_device)) => self.gpu_mm(data, other_data, device),
+            (Device::GPU(data, device), Device::GPU(other_data, other_device)) => self.gpu_mm(other, data, other_data, device),
             _ => panic!("Cannot multiply CPU tensor with GPU tensor or vice versa. Move tensors to the same device first."),
         };
 
@@ -926,11 +939,11 @@ impl<T: TensorElement> Tensor<T> {
         let cols = self_data.shape[1];
         let other_cols = other.len() / cols;
 
-        let mut result = vec![T::from(0.0f32); rows * other_cols];
+        let mut result = vec![T::from(0.0f32).unwrap(); rows * other_cols];
 
         for i in 0..rows {
             for j in 0..other_cols {
-                let mut sum = T::from(0.0f32);
+                let mut sum = T::from(0.0f32).unwrap();
                 for k in 0..cols {
                     sum = sum + data[i * cols + k] * other[k * other_cols + j];
                 }
@@ -941,8 +954,32 @@ impl<T: TensorElement> Tensor<T> {
         Self::new(&result, &[rows, other_cols], false)
     }
 
-    fn gpu_mm(&self, data: &CudaSlice<T>, other: &CudaSlice<T>, device: &Arc<CudaDevice>) -> Self {
-        unimplemented!()
+    fn gpu_mm(&self, other: &Tensor<T>, data: &CudaSlice<T>, other_data_slice: &CudaSlice<T>, device: &Arc<CudaDevice>) -> Self {
+
+        let self_data = self.data.borrow();
+        let other_data = other.data.borrow();
+
+        let rows = self_data.shape[0];
+        let cols = self_data.shape[1];
+        let other_cols = other_data.shape[1];
+
+        let mut result = device.alloc_zeros(rows * other_cols).unwrap();
+
+        let cfg = LaunchConfig {
+            grid_dim: (16, 16, 1),
+            block_dim: ((other_cols as u32 + 15) / 16, (rows as u32 + 15) / 16, 1),
+            shared_mem_bytes: 0,
+        };
+
+        let func = device.get_func("arithmetic", "mm").unwrap();
+
+        unsafe {
+            func.launch(cfg, (data,  other_data_slice, &mut result, rows as u32, cols as u32, other_cols as u32)).unwrap();
+        }
+
+        Self {
+            data: Rc::new(RefCell::new(Self::new_gpu_data(result, device, &[rows, other_cols], self_data.requires_grad)))
+        }
     }
 
     pub fn gt(&self, other: &Self) -> Self {
@@ -962,7 +999,7 @@ impl<T: TensorElement> Tensor<T> {
 
         let self_data = self.data.borrow();
 
-        let data = data.iter().zip(other.iter()).map(|(a, b)| if *a > *b { T::from(1.0f32) } else { T::from(0.0f32) }).collect::<Vec<T>>();
+        let data = data.iter().zip(other.iter()).map(|(a, b)| if *a > *b { T::from(1.0f32).unwrap() } else { T::from(0.0f32).unwrap() }).collect::<Vec<T>>();
         Self::new(&data, &self_data.shape, false)
     }
 
@@ -1009,7 +1046,7 @@ impl<T: TensorElement> Tensor<T> {
 
         let self_data = self.data.borrow();
 
-        let data = data.iter().map(|a| if *a > T::from(0.0) { *a } else { T::from(0.0) } ).collect::<Vec<T>>();
+        let data = data.iter().map(|a| if *a > T::from(0.0).unwrap() { *a } else { T::from(0.0).unwrap() } ).collect::<Vec<T>>();
         Self::new(&data, &self_data.shape, false)
     }
 
@@ -1022,6 +1059,55 @@ impl<T: TensorElement> Tensor<T> {
         let cfg = LaunchConfig::for_num_elems(self_data.size as u32);
 
         let func = device.get_func("activation", "relu").unwrap();
+
+        unsafe {
+            func.launch(cfg, (data, &mut result, self_data.size)).unwrap();
+        }
+
+        Self {
+            data: Rc::new(RefCell::new(Self::new_gpu_data(result, device, &self_data.shape, self_data.requires_grad)))
+        }
+    }
+
+    pub fn sigmoid(&self) -> Self {
+        let self_data = self.data.borrow();
+
+        let result = match &self_data.device {
+            Device::CPU(data) => self.cpu_sigmoid(data),
+            Device::GPU(data, device) => self.gpu_sigmoid(data, device),
+        };
+
+        let result_ref = result.data.clone();
+        let mut result_data = result_ref.borrow_mut();
+
+        result_data.requires_grad = self_data.requires_grad;
+
+        if result_data.requires_grad {
+            result_data.grad_fn = Some(Rc::new(AutogradOps::SigmoidBackward(SigmoidBackward::new([self.data.clone()]))));
+        }
+
+        result
+    }
+
+    fn cpu_sigmoid(&self, data: &Vec<T>) -> Self {
+
+        let self_data = self.data.borrow();
+
+        let one = T::from(1.0).unwrap();
+
+        let data = data.iter().map(|a| one / (one + (-*a).exp())).collect::<Vec<T>>();
+        Self::new(&data, &self_data.shape, false)
+    }
+
+    fn gpu_sigmoid(&self, data: &CudaSlice<T>, device: &Arc<CudaDevice>) -> Self {
+
+        let self_data = self.data.borrow();
+
+        let mut result = device.alloc_zeros(self_data.size).unwrap();
+
+        let cfg = LaunchConfig::for_num_elems(self_data.size as u32);
+
+        let func = device.get_func("activation", "sigmoid").unwrap();
 
         unsafe {
             func.launch(cfg, (data, &mut result, self_data.size)).unwrap();
@@ -1094,6 +1180,13 @@ impl<T: TensorElement> Add<T> for &Tensor<T> {
 
     fn add(self, other: T) -> Self::Output {
         self.add_scalar(other)
+    }
+}
+
+impl<T: TensorElement> AddAssign<&Tensor<T>> for Tensor<T> {
+    fn add_assign(&mut self, other: &Tensor<T>) {
+        let result = self.add_tensor(other);
+        self.data = result.data;
     }
 }
 
@@ -1561,9 +1654,27 @@ mod test {
         assert_eq!(c.get_data(), &[8.0, 5.0, 20.0, 13.0]);
         assert_eq!(c.get_shape(), &[2, 2]);
         assert_eq!(a.grad().unwrap().get_shape(), &[2, 2]);
-        assert_eq!(a.grad().unwrap().get_data(), &[6.0, 6.0, 4.0, 4.0]);
+        assert_eq!(a.grad().unwrap().get_data(), &[7.0, 3.0, 7.0, 3.0]);
         assert_eq!(b.grad().unwrap().get_shape(), &[2, 2]);
-        assert_eq!(b.grad().unwrap().get_data(), &[3.0, 7.0, 3.0, 7.0]);
+        assert_eq!(b.grad().unwrap().get_data(), &[4.0, 4.0, 6.0, 6.0]);
+    }
+
+    #[test]
+    fn test_gpu_mm() {
+
+        let mut a = Tensor::<f32>::new(&[1.0, 2.0, 3.0, 4.0], &[2, 2], true);
+        let mut b = Tensor::<f32>::new(&[4.0, 3.0, 2.0, 1.0], &[2, 2], true);
+        a.to_gpu().unwrap();
+        b.to_gpu().unwrap();
+        let c = a.mm(&b);
+        c.backward(None);
+
+        assert_eq!(c.get_data(), &[8.0, 5.0, 20.0, 13.0]);
+        assert_eq!(c.get_shape(), &[2, 2]);
+        assert_eq!(a.grad().unwrap().get_shape(), &[2, 2]);
+        assert_eq!(a.grad().unwrap().get_data(), &[7.0, 3.0, 7.0, 3.0]);
+        assert_eq!(b.grad().unwrap().get_shape(), &[2, 2]);
+        assert_eq!(b.grad().unwrap().get_data(), &[4.0, 4.0, 6.0, 6.0]);
     }
 
     #[test]
@@ -1591,5 +1702,36 @@ mod test {
         assert_eq!(b.get_shape(), &[2, 2]);
         assert_eq!(a.grad().unwrap().get_shape(), &[2, 2]);
         assert_eq!(a.grad().unwrap().get_data(), &[0.0, 1.0, 0.0, 1.0]);
+    }
+
+    #[test]
+    fn test_sigmoid() {
+
+        let a = Tensor::<f32>::new(&[-1.0, 2.0, -3.0, 4.0], &[2, 2], true);
+        let b = a.sigmoid();
+        b.backward(None);
+
+        let one = 1.0;
+        let data = vec![one / (one + (-(-1.0f32)).exp()), one / (one + (-2.0f32).exp()), one / (one + (-(-3.0f32)).exp()), one / (one + (-4.0f32).exp())];
+        assert_eq!(b.get_data(), data);
+        assert_eq!(b.get_shape(), &[2, 2]);
+        assert_eq!(a.grad().unwrap().get_shape(), &[2, 2]);
+        assert_eq!(a.grad().unwrap().get_data(), &[(data[0] * (one - data[0])), (data[1] * (one - data[1])), (data[2] * (one - data[2])), (data[3] * (one - data[3]))]);
+    }
+
+    #[test]
+    fn test_gpu_sigmoid() {
+
+        let mut a = Tensor::<f32>::new(&[-1.0, 2.0, -3.0, 4.0], &[2, 2], true);
+        a.to_gpu().unwrap();
+        let b = a.sigmoid();
+        b.backward(None);
+
+        let one = 1.0;
+        let data = vec![one / (one + (-(-1.0f32)).exp()), one / (one + (-2.0f32).exp()), one / (one + (-(-3.0f32)).exp()), one / (one + (-4.0f32).exp())];
+        assert_eq!(b.get_data(), data);
+        assert_eq!(b.get_shape(), &[2, 2]);
+        assert_eq!(a.grad().unwrap().get_shape(), &[2, 2]);
+        assert_eq!(a.grad().unwrap().get_data(), &[(data[0] * (one - data[0])), (data[1] * (one - data[1])), (data[2] * (one - data[2])), (data[3] * (one - data[3]))]);
     }
 }

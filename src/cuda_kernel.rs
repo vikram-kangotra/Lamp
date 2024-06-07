@@ -90,6 +90,18 @@ extern "C" __global__ void transpose(const float *a, float *c, int m, int n) {
         c[j * m + i] = a[i * n + j];
     }
 }
+
+extern "C" __global__ void mm(const float *a, const float *b, float *c, int m, int n, int k) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    int j = blockIdx.y * blockDim.y + threadIdx.y;
+    if (i < m && j < n) {
+        float sum = 0;
+        for (int l = 0; l < k; l++) {
+            sum += a[i * k + l] * b[l * n + j];
+        }
+        c[i * n + j] = sum;
+    }
+}
 "#;
 
 pub const UTILS_SRC: &str = r#"
@@ -105,6 +117,13 @@ extern "C" __global__ void relu(const float *a, float *c, int n) {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i < n) {
         c[i] = fmaxf(0, a[i]);
+    }
+}
+
+extern "C" __global__ void sigmoid(const float *a, float *c, int n) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n) {
+        c[i] = 1 / (1 + expf(-a[i]));
     }
 }
 "#;

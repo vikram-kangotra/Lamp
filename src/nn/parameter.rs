@@ -1,4 +1,4 @@
-use std::{fmt::Display, ops::{Add, Deref, DerefMut, Div, Mul, Neg, Sub}};
+use std::{fmt::Display, ops::{Add, AddAssign, Deref, DerefMut, Div, Mul, Neg, Sub}};
 
 use crate::tensor::Tensor;
 
@@ -20,6 +20,14 @@ impl Parameter {
         Self {
             tensor: Tensor::new(&data, shape, true)
         }
+    }
+
+    pub fn zero_grad(&mut self) {
+        self.tensor.zero_grad()
+    }
+
+    pub fn detach(&self) {
+        self.tensor.detach()
     }
 }
 
@@ -47,7 +55,7 @@ impl Into<Parameter> for Tensor<f32> {
 
 impl Display for Parameter {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "Parameter: {}", self.tensor)
+        write!(f, "{}", self.tensor)
     }
 }
 
@@ -72,6 +80,12 @@ impl Add<f32> for &Parameter {
 
     fn add(self, other: f32) -> Self::Output {
         (&self.tensor + other).into()
+    }
+}
+
+impl AddAssign<&Parameter> for Parameter {
+    fn add_assign(&mut self, other: &Parameter) {
+        self.tensor += &other.tensor;
     }
 }
 
