@@ -1,4 +1,5 @@
-use std::{cell::RefCell, fmt::{Display, Formatter}, ops::{Add, AddAssign, Div, Mul, Neg, Sub}, rc::Rc, sync::Arc};
+use core::fmt;
+use std::{cell::RefCell, fmt::{Display, Formatter}, marker::PhantomData, ops::{Add, AddAssign, Div, Mul, Neg, Sub}, rc::Rc, sync::Arc};
 
 use cudarc::{driver::{CudaDevice, CudaSlice, DeviceRepr, DriverError, LaunchAsync, LaunchConfig, ValidAsZeroBits}, nvrtc::compile_ptx};
 
@@ -6,9 +7,12 @@ use crate::{autograd::{add::AddBackward, div::DivBackward, mm::MMBackward, mul::
 
 use num::Float;
 
-pub trait TensorElement: Copy + Clone + PartialOrd + Display + DeviceRepr + ValidAsZeroBits + Neg<Output = Self> + Add<Output = Self> + Sub<Output = Self> + Mul<Output = Self> + Div<Output = Self> + Float {}
+use serde::{Serialize, Serializer, ser::SerializeStruct, Deserialize, Deserializer};
+use serde::de::{self, Visitor, MapAccess};
 
-impl<T> TensorElement for T where T: Copy + Clone + PartialOrd + Display + DeviceRepr + ValidAsZeroBits + Neg<Output = Self> + Add<Output = Self> + Sub<Output = Self> + Mul<Output = Self> + Div<Output = Self> + Float {}
+pub trait TensorElement: Copy + Clone + PartialOrd + Display + DeviceRepr + ValidAsZeroBits + Neg<Output = Self> + Add<Output = Self> + Sub<Output = Self> + Mul<Output = Self> + Div<Output = Self> + Float + Serialize + for<'de> Deserialize<'de> {}
+
+impl<T> TensorElement for T where T: Copy + Clone + PartialOrd + Display + DeviceRepr + ValidAsZeroBits + Neg<Output = Self> + Add<Output = Self> + Sub<Output = Self> + Mul<Output = Self> + Div<Output = Self> + Float + Serialize + for<'de> Deserialize<'de> {}
 
 #[derive(Debug, Clone)]
 enum Device<T: TensorElement> {
@@ -34,6 +38,66 @@ impl<T: TensorElement> Device<T> {
     }
 }
 
+impl<T: TensorElement> Serialize for Device<T> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer
+    {
+
+        let mut state = serializer.serialize_struct("Device", 2)?;
+        state.serialize_field("data", &self.into_cpu())?;
+        state.end()
+    }
+}
+
+impl<'de, T: TensorElement> Deserialize<'de> for Device<T> {
+    fn deserialize<D>(deserializer: D) -> Result<Device<T>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(field_identifier, rename_all = "snake_case")]
+        enum Field { Data }
+
+        struct DeviceVisitor<T: TensorElement> {
+            marker: PhantomData<T>,
+        }
+
+        impl<'de, T: TensorElement> Visitor<'de> for DeviceVisitor<T> {
+            type Value = Device<T>;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+                formatter.write_str("struct Tensor")
+            }
+
+            fn visit_map<V>(self, mut map: V) -> Result<Device<T>, V::Error>
+            where
+                V: MapAccess<'de>,
+            {
+                let mut data = None;
+
+                while let Some(key) = map.next_key()? {
+                    match key {
+                        Field::Data => {
+                            if data.is_some() {
+                                return Err(de::Error::duplicate_field("data"));
+                            }
+                            data = Some(map.next_value()?);
+                        }
+                    }
+                }
+
+                let data = data.ok_or_else(|| de::Error::missing_field("data"))?;
+
+                Ok(Device::CPU(data))
+            }
+        }
+
+        const FIELDS: &'static [&'static str] = &["data"];
+        deserializer.deserialize_struct("Device", FIELDS, DeviceVisitor { marker: PhantomData })
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct TensorData<T: TensorElement> {
     shape: Vec<usize>,
@@ -45,10 +109,177 @@ pub struct TensorData<T: TensorElement> {
     grad_fn: Option<Rc<AutogradOps<T>>>,
 }
 
+impl<T: TensorElement> Serialize for TensorData<T> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let mut state = serializer.serialize_struct("TensorData", 7)?;
+        state.serialize_field("shape", &self.shape)?;
+        state.serialize_field("size", &self.size)?;
+        state.serialize_field("strides", &self.strides)?;
+        state.serialize_field("device", &self.device)?;
+        state.serialize_field("requires_grad", &self.requires_grad)?;
+        state.end()
+    }
+}
+
+impl<'de, T: TensorElement> Deserialize<'de> for TensorData<T> {
+    fn deserialize<D>(deserializer: D) -> Result<TensorData<T>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(field_identifier, rename_all = "snake_case")]
+        enum Field { Shape, Size, Strides, Device, RequiresGrad }
+
+        struct TensorDataVisitor<T: TensorElement> {
+            marker: PhantomData<T>,
+        }
+
+        impl<'de, T: TensorElement> Visitor<'de> for TensorDataVisitor<T> {
+            type Value = TensorData<T>;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+                formatter.write_str("struct TensorData")
+            }
+
+            fn visit_map<V>(self, mut map: V) -> Result<TensorData<T>, V::Error>
+            where
+                V: MapAccess<'de>,
+            {
+                let mut shape: Option<Vec<usize>> = None;
+                let mut size = None;
+                let mut strides = None;
+                let mut device = None;
+                let mut requires_grad = None;
+
+                while let Some(key) = map.next_key()? {
+                    match key {
+                        Field::Shape => {
+                            if shape.is_some() {
+                                return Err(de::Error::duplicate_field("shape"));
+                            }
+                            shape = Some(map.next_value()?);
+                        }
+                        Field::Size => {
+                            if size.is_some() {
+                                return Err(de::Error::duplicate_field("size"));
+                            }
+                            size = Some(map.next_value()?);
+                        }
+                        Field::Strides => {
+                            if strides.is_some() {
+                                return Err(de::Error::duplicate_field("strides"));
+                            }
+                            strides = Some(map.next_value()?);
+                        }
+                        Field::Device => {
+                            if device.is_some() {
+                                return Err(de::Error::duplicate_field("device"));
+                            }
+                            device = Some(map.next_value()?);
+                        }
+                        Field::RequiresGrad => {
+                            if requires_grad.is_some() {
+                                return Err(de::Error::duplicate_field("requires_grad"));
+                            }
+                            requires_grad = Some(map.next_value()?);
+                        }
+                    }
+                }
+
+                let shape = shape.ok_or_else(|| de::Error::missing_field("shape"))?;
+                let size = size.ok_or_else(|| de::Error::missing_field("size"))?;
+                let strides = strides.ok_or_else(|| de::Error::missing_field("strides"))?;
+                let device: Device<T> = device.ok_or_else(|| de::Error::missing_field("device"))?;
+                let requires_grad = requires_grad.ok_or_else(|| de::Error::missing_field("requires_grad"))?;
+
+                Ok(TensorData {
+                    shape,
+                    size,
+                    strides,
+                    device,
+                    requires_grad,
+                    grad: None,
+                    grad_fn: None
+                })
+            }
+        }
+
+        const FIELDS: &'static [&'static str] = &["shape", "size", "strides", "device", "requires_grad"];
+        deserializer.deserialize_struct("TensorData", FIELDS, TensorDataVisitor { marker: PhantomData })
+    }
+
+}
+
 #[derive(Debug, Clone)]
 pub struct Tensor<T: TensorElement> {
     data: Rc<RefCell<TensorData<T>>>,
 }
+
+impl<T: TensorElement> Serialize for Tensor<T> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let tensor_data = self.data.borrow().to_owned();
+        let mut state = serializer.serialize_struct("Tensor", 1)?; 
+        state.serialize_field("data", &tensor_data)?;
+        state.end()
+    }
+}
+
+impl<'de, T: TensorElement> Deserialize<'de> for Tensor<T> {
+    fn deserialize<D>(deserializer: D) -> Result<Tensor<T>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(field_identifier, rename_all = "snake_case")]
+        enum Field { Data }
+
+        struct TensorVisitor<T: TensorElement> {
+            marker: PhantomData<T>,
+        }
+
+        impl<'de, T: TensorElement> Visitor<'de> for TensorVisitor<T> {
+            type Value = Tensor<T>;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+                formatter.write_str("struct Tensor")
+            }
+
+            fn visit_map<V>(self, mut map: V) -> Result<Tensor<T>, V::Error>
+            where
+                V: MapAccess<'de>,
+            {
+                let mut data = None;
+
+                while let Some(key) = map.next_key()? {
+                    match key {
+                        Field::Data => {
+                            if data.is_some() {
+                                return Err(de::Error::duplicate_field("data"));
+                            }
+                            data = Some(map.next_value()?);
+                        }
+                    }
+                }
+
+                let data = data.ok_or_else(|| de::Error::missing_field("data"))?;
+
+                Ok(Tensor {
+                    data: Rc::new(RefCell::new(data)),
+                })
+            }
+        }
+
+        const FIELDS: &'static [&'static str] = &["data"];
+        deserializer.deserialize_struct("Tensor", FIELDS, TensorVisitor { marker: PhantomData })
+    }
+}
+
 
 impl<T: TensorElement> Tensor<T> {
 
@@ -278,7 +509,7 @@ impl<T: TensorElement> Tensor<T> {
         indices.iter().zip(self_data.strides.iter()).fold(0, |acc, (index, stride)| acc + index * stride)
     }
 
-    pub fn gpu_get_flat_item(&self, data: &CudaSlice<T>, device: &Arc<CudaDevice>, offset: usize) -> T {
+    fn gpu_get_flat_item(&self, data: &CudaSlice<T>, device: &Arc<CudaDevice>, offset: usize) -> T {
         let mut result = device.alloc_zeros(1).unwrap();
 
         let cfg = LaunchConfig::for_num_elems(1);

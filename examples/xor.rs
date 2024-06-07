@@ -3,6 +3,9 @@ use std::{cell::RefCell, rc::Rc};
 use lamp::nn::{activation::{Activation, ReLU, Sigmoid}, loss::MSELoss, modules::{linear::Linear, Module, ModuleParams}, optim::{sgd::SGD, Optimizer}, parameter::Parameter};
 use lamp::tensor::Tensor;
 
+use serde::{Serialize, Deserialize};
+
+#[derive(Serialize, Deserialize)]
 struct Model {
     fc1: Linear,
     fc2: Linear,
@@ -54,7 +57,7 @@ fn main() {
 
     let mut loss = Parameter::new(&[1, 1]);
 
-    for _epoch in 0..epochs {
+    for epoch in 0..epochs {
         for (x, target) in input.iter().zip(target.iter()) {
             let x: Parameter = Tensor::<f32>::new(x, &[2, 1], false).into();
             let target: Parameter = Tensor::<f32>::new(&[*target], &[1, 1], false).into();
@@ -67,10 +70,14 @@ fn main() {
             optim.step();
         }
 
-        //println!("Epoch: {}/{epochs}, Loss: {}", epoch + 1, loss);
+        println!("Epoch: {}/{epochs}, Loss: {}", epoch + 1, loss);
     }
 
-    println!("Final loss: {}", loss);
+    println!("Final loss: {}", loss.get_flat_item(0));
+
+    model.save_model("examples/model").unwrap();
+
+    let model = Model::load_model("examples/model").unwrap();
 
     let x = Tensor::<f32>::new(&[0.0, 0.0], &[2, 1], false).into();
     let y = model.forward(&x);

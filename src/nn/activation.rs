@@ -1,9 +1,11 @@
 use super::parameter::Parameter;
+use serde::{Serialize, Deserialize};
 
-pub trait Activation {
+pub trait Activation: Serialize {
     fn forward(&self, x: &Parameter) -> Parameter;
 }
 
+#[derive(Serialize, Deserialize)]
 pub struct ReLU;
 
 impl ReLU {
@@ -18,6 +20,7 @@ impl Activation for ReLU {
     }
 }
 
+#[derive(Serialize, Deserialize)]
 pub struct Sigmoid;
 
 impl Sigmoid {

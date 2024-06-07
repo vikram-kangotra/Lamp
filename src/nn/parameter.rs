@@ -4,6 +4,9 @@ use crate::tensor::Tensor;
 
 use rand::Rng;
 
+use serde::{Serialize, Deserialize};
+
+#[derive(Serialize, Deserialize)]
 pub struct Parameter {
     tensor: Tensor<f32>,
 }
